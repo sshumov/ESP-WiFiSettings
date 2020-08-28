@@ -1,41 +1,22 @@
 #include "WiFiSettings.h"
-#ifdef ESP32
-    #define ESPFS SPIFFS
-    #include <SPIFFS.h>
-    #include <WiFi.h>
-    #include <WebServer.h>
-    #include <esp_task_wdt.h>
-#elif ESP8266
-    #define ESPFS LittleFS
-    #include <LittleFS.h>
-    #include <ESP8266WiFi.h>
-    #include <ESP8266WebServer.h>
-    #define WebServer ESP8266WebServer
-    #define esp_task_wdt_reset wdt_reset
-    #define wifi_auth_mode_t uint8_t    // wl_enc_type
-    #define WIFI_AUTH_OPEN ENC_TYPE_NONE
-    #define WIFI_AUTH_WPA2_ENTERPRISE -1337 // not available on ESP8266
-    #define setHostname hostname
-    #define INADDR_NONE IPAddress(0,0,0,0)
-#else
-    #error "This library only supports ESP32 and ESP8266"
-#endif
-#include <DNSServer.h>
-#include <limits.h>
+
 #include <vector>
 
 #define Sprintf(f, ...) ({ char* s; asprintf(&s, f, __VA_ARGS__); String r = s; free(s); r; })
 
+   
 namespace {  // Helpers
     String slurp(const String& fn) {
-        File f = ESPFS.open(fn, "r");
+      String cnf="/wifi/" + fn + ".txt";
+        File f = ESPFS.open(cnf, "r");
         String r = f.readString();
         f.close();
         return r;
     }
 
     void spurt(const String& fn, const String& content) {
-        File f = ESPFS.open(fn, "w");
+        String cnf="/wifi/" + fn + ".txt";
+        File f = ESPFS.open(cnf, "w");
         f.print(content);
         f.close();
     }
@@ -182,55 +163,64 @@ bool WiFiSettingsClass::checkbox(const String& name, bool init, const String& la
     return x->value.toInt();
 }
 
-void WiFiSettingsClass::portal() {
-    static WebServer http(80);
-    static DNSServer dns;
+void WiFiSettingsClass::portal(bool AP) {
+
     static int num_networks = -1;
     begin();
-
-    #ifdef ESP32
+    if(AP == true ) {
+#ifdef ESP32
         WiFi.disconnect(true, true);    // reset state so .scanNetworks() works
-    #else
+#else
         WiFi.disconnect(true);
-    #endif
-
-    Serial.println(F("Starting access point for configuration portal."));
-    if (secure && password.length()) {
-        Serial.printf("SSID: '%s', Password: '%s'\n", hostname.c_str(), password.c_str());
-        WiFi.softAP(hostname.c_str(), password.c_str());
-    } else {
-        Serial.printf("SSID: '%s'\n", hostname.c_str());
-        WiFi.softAP(hostname.c_str());
-    }
-    delay(500);
-    dns.setTTL(0);
-    dns.start(53, "*", WiFi.softAPIP());
+#endif
+    
+        Serial.println(F("Starting access point for configuration portal."));
+        if (secure && password.length()) {
+         Serial.printf("SSID: '%s', Password: '%s'\n", hostname.c_str(), password.c_str());
+         WiFi.softAP(hostname.c_str(), password.c_str());
+        } else {
+         Serial.printf("SSID: '%s'\n", hostname.c_str());
+         WiFi.softAP(hostname.c_str());
+        }
+        
+        delay(500);
+        _dnsServer->setTTL(0);
+        _dnsServer->start(53, "*", WiFi.softAPIP());
+        Serial.println(WiFi.softAPIP().toString());
+   }
+    
 
     if (onPortal) onPortal();
-    Serial.println(WiFi.softAPIP().toString());
 
-    http.on("/", HTTP_GET, [this]() {
-        http.setContentLength(CONTENT_LENGTH_UNKNOWN);
-        http.send(200, "text/html");
-        http.sendContent(F("<!DOCTYPE html>\n<meta charset=UTF-8><title>"));
-        http.sendContent(html_entities(hostname));
-        http.sendContent(F("</title>"
+    _server->on("/", HTTP_GET, [this]() {
+         _server->setContentLength(CONTENT_LENGTH_UNKNOWN);
+         _server->send(200, "text/html");
+         _server->sendContent(F("<!DOCTYPE html>\n<meta charset=UTF-8><title>"));
+         _server->sendContent(F("<!DOCTYPE html><html lang=\"en\"><head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1, user-scalable=no\"/>"
+          "<title>Hello!</title></head><body>Hello world!Go to <a href='portal'>configure page</a> to change settings.</body></html>\n"
+          ));
+    });
+
+    _server->on("/portal", HTTP_GET, [this]() {
+        _server->setContentLength(CONTENT_LENGTH_UNKNOWN);
+        _server->send(200, "text/html");
+        _server->sendContent(F("<!DOCTYPE html>\n<meta charset=UTF-8><title>"));
+        _server->sendContent(html_entities(hostname));
+
+        _server->sendContent(F("</title>"
             "<meta name=viewport content='width=device-width,initial-scale=1'>"
-            "<style>"
-            "*{box-sizing:border-box} "
+            "<style>*{box-sizing:border-box} "
             "html{background:#444;font:10pt sans-serif}"
             "body{background:#ccc;color:black;max-width:30em;padding:1em;margin:1em auto}"
-            "a:link{color:#000} "
-            "label{clear:both}"
+            "a:link{color:#000} label{clear:both}"
             "select,input:not([type^=c]){display:block;width:100%;border:1px solid #444;padding:.3ex}"
             "input[type^=s]{width:auto;background:#de1;padding:1ex;border:1px solid #000;border-radius:1ex}"
-            "[type^=c]{float:left}"
-            ":not([type^=s]):focus{outline:2px solid #d1ed1e}"
-            "</style>"
-            "<form action=/restart method=post>Hello, my name is "
+            "[type^=c]{float:left}:not([type^=s]):focus{outline:2px solid #d1ed1e}"
+            "</style><form action=/restart method=post>Hello, my name is "
         ));
-        http.sendContent(html_entities(hostname));
-        http.sendContent(F(
+      
+        _server->sendContent(html_entities(hostname));
+        _server->sendContent(F(
                 "."
                 "<input type=submit value='Restart device'>"
             "</form>"
@@ -243,7 +233,7 @@ void WiFiSettingsClass::portal() {
         if (num_networks < 0) num_networks = WiFi.scanNetworks();
         Serial.printf("%d WiFi networks found.\n", num_networks);
 
-        http.sendContent(F(
+        _server->sendContent(F(
             "<style>.s{display:none}</style>"   // hide "scanning"
             "<select name=ssid onchange=\"document.getElementsByName('password')[0].value=''\">"
         ));
@@ -259,73 +249,74 @@ void WiFiSettingsClass::portal() {
             opt.replace("{ssid}", html_entities(ssid));
             opt.replace("{lock}", mode != WIFI_AUTH_OPEN ? "&#x1f512;" : "");
             opt.replace("{1x}",   mode == WIFI_AUTH_WPA2_ENTERPRISE ? "(won't work: 802.1x is not supported)" : "");
-            http.sendContent(opt);
+            _server->sendContent(opt);
 
             if (ssid == current) found = true;
         }
         if (!found && current.length()) {
             String opt = F("<option value='{ssid}' selected>{ssid} (&#x26a0; not in range)</option>");
             opt.replace("{ssid}", html_entities(current));
-            http.sendContent(opt);
+            _server->sendContent(opt);
         }
 
-        http.sendContent(F("</select></label> "
+        _server->sendContent(F("</select></label> "
                 "<a href=/rescan onclick=\"this.innerHTML='scanning...';\">rescan</a>"
                 "<p><label>WiFi WEP/WPA password:<br>"
                 "<input name=password value='"
         ));
-        if (slurp("/wifi-password").length()) http.sendContent("##**##**##**");
-        http.sendContent(F("'></label><hr>"));
+        if (slurp("/wifi-password").length()) _server->sendContent("##**##**##**");
+        _server->sendContent(F("'></label><hr>"));
 
         for (auto p : params) {
-            http.sendContent(p->html());
-            http.sendContent("<p>");
+            _server->sendContent(p->html());
+            _server->sendContent("<p>");
         }
 
-        http.sendContent(F("<input type=submit value=Save></form>"));
+        _server->sendContent(F("<input type=submit value=Save></form>"));
     });
 
-    http.on("/", HTTP_POST, [this]() {
-        spurt("/wifi-ssid", http.arg("ssid"));
+    _server->on("/portal", HTTP_POST, [this]() {
+        spurt("/wifi-ssid", _server->arg("ssid"));
 
-        String pw = http.arg("password");
+        String pw = _server->arg("password");
         if (pw != "##**##**##**") {
             spurt("/wifi-password", pw);
         }
 
-        for (auto p : params) p->store(http.arg(p->name));
+        for (auto p : params) p->store(_server->arg(p->name));
 
-        http.sendHeader("Location", "/");
-        http.send(302, "text/plain", "ok");
+        _server->sendHeader("Location", "/portal");
+        _server->send(302, "text/plain", "ok");
         if (onConfigSaved) onConfigSaved();
     });
 
-    http.on("/restart", HTTP_POST, [this]() {
-        http.send(200, "text/plain", "Doei!");
+    _server->on("/restart", HTTP_POST, [this]() {
+        _server->send(200, "text/plain", "Doei!");
         if (onRestart) onRestart();
         ESP.restart();
     });
 
-    http.on("/rescan", HTTP_GET, [this]() {
-        http.sendHeader("Location", "/");
-        http.send(302, "text/plain", "wait for it...");
+    _server->on("/rescan", HTTP_GET, [this]() {
+        _server->sendHeader("Location", "/");
+        _server->send(302, "text/plain", "wait for it...");
         num_networks = WiFi.scanNetworks();
     });
 
-    http.onNotFound([this]() {
-        http.sendHeader("Location", "http://" + hostname + "/");
-        http.send(302, "text/plain", "hoi");
+    _server->onNotFound([this]() {
+        _server->sendHeader("Location", "http://" + hostname + "/");
+        _server->send(302, "text/plain", "hoi");
     });
 
-    http.begin();
-
+   if(AP == true ) {
+    _server->begin();
     for (;;) {
-        http.handleClient();
-        dns.processNextRequest();
+        _server->handleClient();
+        _dnsServer->processNextRequest();
         if (onPortalWaitLoop) onPortalWaitLoop();
         esp_task_wdt_reset();
         delay(1);
     }
+   }
 }
 
 bool WiFiSettingsClass::connect(bool portal, int wait_seconds) {
@@ -337,7 +328,7 @@ bool WiFiSettingsClass::connect(bool portal, int wait_seconds) {
     String pw = slurp("/wifi-password");
     if (ssid.length() == 0 && portal) {
         Serial.println("First contact!\n");
-        this->portal();
+        this->portal(true);
     }
 
     Serial.printf("Connecting to WiFi SSID '%s'", ssid.c_str());
@@ -356,7 +347,7 @@ bool WiFiSettingsClass::connect(bool portal, int wait_seconds) {
     if (WiFi.status() != WL_CONNECTED) {
         Serial.println(" failed.");
         if (onFailure) onFailure();
-        if (portal) this->portal();
+        if (portal) this->portal(true);
         return false;
     }
 
@@ -396,12 +387,14 @@ void WiFiSettingsClass::begin() {
     }
 }
 
-WiFiSettingsClass::WiFiSettingsClass() {
+WiFiSettingsClass::WiFiSettingsClass(WebServer* Wserver,DNSServer* dns) {
     #ifdef ESP32
         hostname = Sprintf("esp32-%06" PRIx64, ESP.getEfuseMac() >> 24);
     #else
         hostname = Sprintf("esp8266-%06" PRIx32, ESP.getChipId());
     #endif
+    _server= Wserver;
+    _dnsServer = dns;
 }
 
-WiFiSettingsClass WiFiSettings;
+//WiFiSettingsClass WiFiSettings;
